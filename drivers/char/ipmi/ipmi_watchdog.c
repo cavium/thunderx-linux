@@ -145,7 +145,7 @@
 static DEFINE_MUTEX(ipmi_watchdog_mutex);
 static bool nowayout = WATCHDOG_NOWAYOUT;
 
-static ipmi_user_t watchdog_user;
+static struct ipmi_user *watchdog_user;
 static int watchdog_ifnum;
 
 /* Default the timeout to 10 seconds. */
