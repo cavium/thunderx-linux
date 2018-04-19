@@ -1243,7 +1243,6 @@ static int ssif_remove(struct i2c_client *client)
 	struct ssif_info *ssif_info = i2c_get_clientdata(client);
 	struct ipmi_smi *intf;
 	struct ssif_addr_info *addr_info;
-	int rv;
 
 	if (!ssif_info)
 		return 0;
@@ -1263,7 +1262,7 @@ static int ssif_remove(struct i2c_client *client)
 		}
 	}
 
-	return rv;
+	return 0;
 }
 
 static int read_response(struct i2c_client *client, unsigned char *resp)
