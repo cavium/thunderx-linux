@@ -250,6 +250,10 @@ static int __init __parse_crashkernel(char *cmdline,
 	if (suffix)
 		return parse_crashkernel_suffix(ck_cmdline, crash_size,
 				suffix);
+#if defined(CONFIG_ARM64)
+	if (strncmp(ck_cmdline, "auto", 4) == 0)
+		ck_cmdline="2G-:512M";
+#endif
 	/*
 	 * if the commandline contains a ':', then that's the extended
 	 * syntax -- if not, it must be the classic syntax
