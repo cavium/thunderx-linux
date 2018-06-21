@@ -1,0 +1,66 @@
+
+Cavium ThunderX2 SoC Performance Monitoring Unit (PMU UNCORE)
+==========================================================================
+
+ThunderX2 SoC PMU consists of independent system wide per Socket PMUs such
+as Level 3 Cache(L3C) and DDR4 Memory Controller(DMC).
+
+It has 8 independent DMC PMUs to capture performance events corresponding
+to 8 channels of DDR4 Memory Controller. There are 16 independent L3C PMUs
+to capture events corresponding to 16 tiles of L3 cache. Each PMU supports
+up to 4 counters.
+
+Counters are independently programmable and can be started and stopped
+individually. Each counter can be set to sample specific perf events.
+Counters are 32 bit and do not support overflow interrupt; they are
+sampled at every 2 seconds. The Counters register access are multiplexed
+across channels of DMC and L3C. The muxing(select channel) is done through
+write to a Secure register using smcc calls.
+
+PMU UNCORE (perf) driver:
+
+The thunderx2-pmu driver registers several perf PMUs for DMC and L3C devices.
+Each of the PMUs provides description of its available events
+and configuration options in sysfs.
+	see /sys/devices/uncore_<l3c_S_X/dmc_S_X/>
+
+S is socket id and X represents channel number.
+Each PMU can be used to sample up to 4 events simultaneously.
+
+The "format" directory describes format of the config (event ID).
+The "events" directory provides configuration templates for all
+supported event types that can be used with perf tool.
+
+For example, "uncore_dmc_0_0/cnt_cycles/" is an
+equivalent of "uncore_dmc_0_0/config=0x1/".
+
+Each perf driver also provides a "cpumask" sysfs attribute, which contains a
+single CPU ID of the processor which is likely to be used to handle all the
+PMU events. It will be the first online CPU from the NUMA node of PMU device.
+
+Example for perf tool use:
+
+perf stat -a -e \
+uncore_dmc_0_0/cnt_cycles/,\
+uncore_dmc_0_1/cnt_cycles/,\
+uncore_dmc_0_2/cnt_cycles/,\
+uncore_dmc_0_3/cnt_cycles/,\
+uncore_dmc_0_4/cnt_cycles/,\
+uncore_dmc_0_5/cnt_cycles/,\
+uncore_dmc_0_6/cnt_cycles/,\
+uncore_dmc_0_7/cnt_cycles/ sleep 1
+
+perf stat -a -e \
+uncore_dmc_0_0/cancelled_read_txns/,\
+uncore_dmc_0_0/cnt_cycles/,\
+uncore_dmc_0_0/consumed_read_txns/,\
+uncore_dmc_0_0/data_transfers/ sleep 1
+
+perf stat -a -e \
+uncore_l3c_0_0/l3_retry/,\
+uncore_l3c_0_0/read_hit/,\
+uncore_l3c_0_0/read_request/,\
+uncore_l3c_0_0/inv_request/ sleep 1
+
+The driver does not support sampling, therefore "perf record" will
+not work. Per-task (without "-a") perf sessions are not supported.
