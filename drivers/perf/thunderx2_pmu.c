@@ -18,7 +18,8 @@
  * sampled before overflow(i.e, at every 2 seconds).
  */
 
-#define UNCORE_MAX_COUNTERS		4
+#define UNCORE_MAX_DMC_COUNTERS		4
+#define UNCORE_MAX_L3C_COUNTERS		4
 #define UNCORE_DMC_MAX_CHANNELS		8
 #define UNCORE_L3_MAX_TILES		16
 
@@ -27,6 +28,15 @@
 #define GET_COUNTERID(ev)		((ev->hw.idx) & 0xf)
 #define GET_CHANNELID(pmu_uncore)	(pmu_uncore->channel)
 #define DMC_EVENT_CFG(idx, val)		((val) << (((idx) * 8) + 1))
+
+#define UNCORE_MAX_CCPI2_COUNTERS	8
+#define UNCORE_CCPI2_MAX_CHANNELS	1
+#define UNCORE_CCPI2_HRTIMER_INTERVAL	(3 * NSEC_PER_SEC)
+#define CCPI2_COUNTER_DATA_H		0x4
+#define CCPI2_PERF_CTL			0x8
+#define CCPI2_COUNTER_SEL		0x2c
+#define CCPI2_COUNTER_CTL		0x10C
+#define CCPI2_COUNTER_DATA_L		0x130
 
 #define L3C_COUNTER_CTL			0xA8
 #define L3C_COUNTER_DATA		0xAC
@@ -84,9 +94,17 @@ enum thunderx2_uncore_dmc_events {
 	DMC_EVENT_MAX,
 };
 
+enum thunderx2_uncore_ccpi2_events {
+	CCPI2_EVENT_NODE0_PKT_COUNT = 40,
+	CCPI2_EVENT_NODE1_PKT_COUNT,
+	CCPI2_EVENT_RES512 = 512,
+	CCPI2_EVENT_MAX,
+};
+
 enum thunderx2_uncore_type {
 	PMU_TYPE_L3C,
 	PMU_TYPE_DMC,
+	PMU_TYPE_CCPI2,
 	PMU_TYPE_INVALID,
 };
 
@@ -101,8 +119,8 @@ struct thunderx2_pmu_uncore_channel {
 	struct thunderx2_pmu_uncore_dev *uncore_dev;
 	int channel;
 	int cpu;
-	DECLARE_BITMAP(active_counters, UNCORE_MAX_COUNTERS);
-	struct perf_event *events[UNCORE_MAX_COUNTERS];
+	DECLARE_BITMAP(active_counters, UNCORE_MAX_CCPI2_COUNTERS);
+	struct perf_event *events[UNCORE_MAX_CCPI2_COUNTERS];
 	struct hrtimer hrtimer;
 	/* to sync counter alloc/release */
 	raw_spinlock_t lock;
@@ -164,6 +182,11 @@ static struct attribute *dmc_pmu_format_attrs[] = {
 	NULL,
 };
 
+static struct attribute *ccpi2_pmu_format_attrs[] = {
+	FORMAT_ATTR(event,	"config:0-9"),
+	NULL,
+};
+
 static const struct attribute_group l3c_pmu_format_attr_group = {
 	.name = "format",
 	.attrs = l3c_pmu_format_attrs,
@@ -172,6 +195,11 @@ static const struct attribute_group l3c_pmu_format_attr_group = {
 static const struct attribute_group dmc_pmu_format_attr_group = {
 	.name = "format",
 	.attrs = dmc_pmu_format_attrs,
+};
+
+static const struct attribute_group ccpi2_pmu_format_attr_group = {
+	.name = "format",
+	.attrs = ccpi2_pmu_format_attrs,
 };
 
 /*
@@ -233,6 +261,12 @@ static struct attribute *dmc_pmu_events_attrs[] = {
 	NULL,
 };
 
+static struct attribute *ccpi2_pmu_events_attrs[] = {
+	EVENT_ATTR(node0_pkt_count,		CCPI2_EVENT_NODE0_PKT_COUNT),
+	EVENT_ATTR(node1_pkt_count,		CCPI2_EVENT_NODE1_PKT_COUNT),
+	NULL,
+};
+
 static const struct attribute_group l3c_pmu_events_attr_group = {
 	.name = "events",
 	.attrs = l3c_pmu_events_attrs,
@@ -241,6 +275,11 @@ static const struct attribute_group l3c_pmu_events_attr_group = {
 static const struct attribute_group dmc_pmu_events_attr_group = {
 	.name = "events",
 	.attrs = dmc_pmu_events_attrs,
+};
+
+static const struct attribute_group ccpi2_pmu_events_attr_group = {
+	.name = "events",
+	.attrs = ccpi2_pmu_events_attrs,
 };
 
 /*
@@ -282,6 +321,13 @@ static const struct attribute_group *dmc_pmu_attr_groups[] = {
 	&dmc_pmu_format_attr_group,
 	&pmu_cpumask_attr_group,
 	&dmc_pmu_events_attr_group,
+	NULL
+};
+
+static const struct attribute_group *ccpi2_pmu_attr_groups[] = {
+	&ccpi2_pmu_format_attr_group,
+	&pmu_cpumask_attr_group,
+	&ccpi2_pmu_events_attr_group,
 	NULL
 };
 
@@ -412,6 +458,47 @@ static void uncore_stop_event_dmc(struct perf_event *event)
 	reg_writel(val, hwc->config_base);
 }
 
+static void uncore_start_event_ccpi2(struct perf_event *event, int flags)
+{
+	u32 val;
+	unsigned long ccpi2_base;
+	struct hw_perf_event *hwc = &event->hw;
+
+	ccpi2_base = hwc->config_base & ~(0xFF);
+
+	/* enable and start counters and read current value in prev_count */
+
+	/* bit[0] enable event */
+	reg_writel(0x1, ccpi2_base + CCPI2_PERF_CTL);
+	val = reg_readl(hwc->config_base);
+
+	/* Bit [09:00] event id
+	 * Bit [10] level
+	 */
+	reg_writel((val & ~0x3FF) | (3 << 10) | GET_EVENTID(event), hwc->config_base);
+
+	/* bit[1:0] start and enable of event */
+	reg_writel(0x3 | 1 << 4 , ccpi2_base + CCPI2_PERF_CTL);
+
+	reg_writel(GET_COUNTERID(event) | 1 << 3 | 1 << 4, ccpi2_base + CCPI2_COUNTER_SEL);
+	reg_writel(0, hwc->event_base);
+	reg_writel(0, hwc->event_base + CCPI2_COUNTER_DATA_H);
+	reg_writel( 1 << 3 | GET_COUNTERID(event), ccpi2_base + CCPI2_COUNTER_SEL);
+	local64_set(&event->hw.prev_count, 0ULL);
+}
+
+static void uncore_stop_event_ccpi2(struct perf_event *event)
+{
+	unsigned long ccpi2_base;
+	struct hw_perf_event *hwc = &event->hw;
+
+	/* select, disable and stop counter */
+	ccpi2_base = hwc->config_base & ~(0xFF);
+	reg_writel(GET_COUNTERID(event) | 1 << 3 , ccpi2_base + CCPI2_COUNTER_SEL);
+	reg_writel(0, ccpi2_base + CCPI2_PERF_CTL);
+	reg_writel(0, hwc->config_base);
+}
+
 static void init_cntr_base_l3c(struct perf_event *event,
 		struct thunderx2_pmu_uncore_dev *uncore_dev)
 {
@@ -436,6 +523,18 @@ static void init_cntr_base_dmc(struct perf_event *event,
 		+ DMC_COUNTER_DATA + (0xc * GET_COUNTERID(event));
 }
 
+static void init_cntr_base_ccpi2(struct perf_event *event,
+		struct thunderx2_pmu_uncore_dev *uncore_dev) {
+
+	struct hw_perf_event *hwc = &event->hw;
+
+	/* counter ctrl reg offset at 4 */
+	hwc->config_base = (unsigned long)uncore_dev->base
+		+ CCPI2_COUNTER_CTL + (4 * GET_COUNTERID(event));
+	hwc->event_base =  (unsigned long)uncore_dev->base
+		+ CCPI2_COUNTER_DATA_L;
+}
+
 static void thunderx2_uncore_update(struct perf_event *event)
 {
 	s64 prev, new = 0;
@@ -447,13 +546,28 @@ static void thunderx2_uncore_update(struct perf_event *event)
 	pmu_uncore = pmu_to_thunderx2_pmu_uncore(event->pmu);
 	type = pmu_uncore->uncore_dev->type;
 
-	pmu_uncore->uncore_dev->select_channel(event);
+	if (pmu_uncore->uncore_dev->select_channel)
+		pmu_uncore->uncore_dev->select_channel(event);
 
-	new = reg_readl(hwc->event_base);
-	prev = local64_xchg(&hwc->prev_count, new);
+	if (type == PMU_TYPE_CCPI2) {
+		unsigned long  ccpi2_base = hwc->config_base & ~(0xFF);
 
-	/* handles rollover of 32 bit counter */
-	delta = (u32)(((1UL << 32) - prev) + new);
+		reg_writel(1 << 3 | GET_COUNTERID(event), ccpi2_base +
+				CCPI2_COUNTER_SEL);
+
+		new = reg_readl(hwc->event_base);
+		new |= (u64)reg_readl(hwc->event_base +
+				CCPI2_COUNTER_DATA_H) << 32;
+
+		prev = local64_xchg(&hwc->prev_count, new);
+		delta = new - prev;
+	} else {
+		new = reg_readl(hwc->event_base);
+		prev = local64_xchg(&hwc->prev_count, new);
+		/* handles rollover of 32 bit counter */
+		delta = (u32)(((1UL << 32) - prev) + new);
+	}
+
 	local64_add(delta, &event->count);
 }
 
@@ -466,6 +580,7 @@ enum thunderx2_uncore_type get_uncore_device_type(struct acpi_device *adev)
 	} devices[] = {
 		{"CAV901D", PMU_TYPE_L3C},
 		{"CAV901F", PMU_TYPE_DMC},
+		{"CAV901E", PMU_TYPE_CCPI2},
 		{"", PMU_TYPE_INVALID}
 	};
 
@@ -486,7 +601,9 @@ static bool thunderx2_uncore_validate_event_group(struct perf_event *event)
 	struct pmu *pmu = event->pmu;
 	struct perf_event *leader = event->group_leader;
 	struct perf_event *sibling;
+	struct thunderx2_pmu_uncore_channel *pmu_uncore;
 	int counters = 0;
+	pmu_uncore = pmu_to_thunderx2_pmu_uncore(event->pmu);
 
 	if (leader->pmu != event->pmu && !is_software_event(leader))
 		return false;
@@ -503,7 +620,7 @@ static bool thunderx2_uncore_validate_event_group(struct perf_event *event)
 	 * If the group requires more counters than the HW has,
 	 * it cannot ever be scheduled.
 	 */
-	return counters < UNCORE_MAX_COUNTERS;
+	return counters < pmu_uncore->uncore_dev->max_counters;
 }
 
 static int thunderx2_uncore_event_init(struct perf_event *event)
@@ -559,7 +676,8 @@ static void thunderx2_uncore_start(struct perf_event *event, int flags)
 	uncore_dev = pmu_uncore->uncore_dev;
 
 	raw_spin_lock_irqsave(&uncore_dev->lock, irqflags);
-	uncore_dev->select_channel(event);
+	if (uncore_dev->select_channel)
+		uncore_dev->select_channel(event);
 	uncore_dev->start_event(event, flags);
 	raw_spin_unlock_irqrestore(&uncore_dev->lock, irqflags);
 
@@ -588,7 +706,8 @@ static void thunderx2_uncore_stop(struct perf_event *event, int flags)
 
 	raw_spin_lock_irqsave(&uncore_dev->lock, irqflags);
 
-	uncore_dev->select_channel(event);
+	if (uncore_dev->select_channel)
+		uncore_dev->select_channel(event);
 	uncore_dev->stop_event(event);
 
 	WARN_ON_ONCE(hwc->state & PERF_HES_STOPPED);
@@ -798,7 +917,7 @@ static struct thunderx2_pmu_uncore_dev *init_pmu_uncore_dev(
 
 	switch (uncore_dev->type) {
 	case PMU_TYPE_L3C:
-		uncore_dev->max_counters = UNCORE_MAX_COUNTERS;
+		uncore_dev->max_counters = UNCORE_MAX_L3C_COUNTERS;
 		uncore_dev->max_channels = UNCORE_L3_MAX_TILES;
 		uncore_dev->max_events = L3_EVENT_MAX;
 		uncore_dev->hrtimer_interval = UNCORE_HRTIMER_INTERVAL;
@@ -811,7 +930,7 @@ static struct thunderx2_pmu_uncore_dev *init_pmu_uncore_dev(
 		uncore_dev->select_channel = uncore_select_channel;
 		break;
 	case PMU_TYPE_DMC:
-		uncore_dev->max_counters = UNCORE_MAX_COUNTERS;
+		uncore_dev->max_counters = UNCORE_MAX_DMC_COUNTERS;
 		uncore_dev->max_channels = UNCORE_DMC_MAX_CHANNELS;
 		uncore_dev->max_events = DMC_EVENT_MAX;
 		uncore_dev->hrtimer_interval = UNCORE_HRTIMER_INTERVAL;
@@ -822,6 +941,19 @@ static struct thunderx2_pmu_uncore_dev *init_pmu_uncore_dev(
 		uncore_dev->start_event = uncore_start_event_dmc;
 		uncore_dev->stop_event = uncore_stop_event_dmc;
 		uncore_dev->select_channel = uncore_select_channel;
+		break;
+	case PMU_TYPE_CCPI2:
+		uncore_dev->max_counters = UNCORE_MAX_CCPI2_COUNTERS;
+		uncore_dev->max_channels = UNCORE_CCPI2_MAX_CHANNELS;
+		uncore_dev->max_events = CCPI2_EVENT_MAX;
+		uncore_dev->hrtimer_interval = UNCORE_CCPI2_HRTIMER_INTERVAL;
+		uncore_dev->attr_groups = ccpi2_pmu_attr_groups;
+		uncore_dev->name = devm_kasprintf(dev, GFP_KERNEL,
+				"uncore_ccp_%d",uncore_dev->node);
+		uncore_dev->init_cntr_base = init_cntr_base_ccpi2;
+		uncore_dev->select_channel = NULL;
+		uncore_dev->start_event = uncore_start_event_ccpi2;
+		uncore_dev->stop_event = uncore_stop_event_ccpi2;
 		break;
 	case PMU_TYPE_INVALID:
 		devm_kfree(dev, uncore_dev);
