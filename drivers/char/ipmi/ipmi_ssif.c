@@ -92,6 +92,8 @@
 #define SSIF_MSG_JIFFIES	((SSIF_MSG_USEC * 1000) / TICK_NSEC)
 #define SSIF_MSG_PART_JIFFIES	((SSIF_MSG_PART_USEC * 1000) / TICK_NSEC)
 
+#define SSIF_MAX_MSG_LENGTH	255
+
 enum ssif_intf_state {
 	SSIF_NORMAL,
 	SSIF_GETTING_FLAGS,
@@ -969,10 +971,21 @@ static int start_resend(struct ssif_info *ssif_info)
 		ssif_info->multi_data = ssif_info->data;
 		ssif_info->multi_len = ssif_info->data_len;
 		/*
+		 * As per spec SSIF_MULTI_n_PART's middle transfers
+		 * must be of size 32 bytes, and the last message
+		 * should be of bytes 1-31. We won't be able to transfer
+		 * any messages coming from the upper layer which is exactly
+		 * n multiple of 32 where n > 1.
+		 */
+
+		if (!(ssif_info->data_len % 32))
+			return -EINVAL;
+		/*
 		 * Subtle thing, this is 32, not 33, because we will
 		 * overwrite the thing at position 32 (which was just
 		 * transmitted) with the new length.
 		 */
+
 		ssif_info->multi_pos = 32;
 		ssif_info->data[0] = 32;
 	} else {
@@ -1581,9 +1594,16 @@ static int ssif_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			 * start and the next message is always going
 			 * to be 1-31 bytes in length.  Not ideal, but
 			 * it should work.
+			 * SSIF supports message length up to 255 bytes.
+			 * If we limit the length to 63 here, we won't be
+			 * able to send messages larger than 63 bytes.
+			 * Chunking of data is done based on 32 bytes and
+			 * not based on the max_xmit_msg_size. So additional
+			 * logic to check whether the message length is n*32,
+			 * where n > 1, is done in function start_resend().
 			 */
-			if (ssif_info->max_xmit_msg_size > 63)
-				ssif_info->max_xmit_msg_size = 63;
+			if (ssif_info->max_xmit_msg_size > SSIF_MAX_MSG_LENGTH)
+				ssif_info->max_xmit_msg_size = SSIF_MAX_MSG_LENGTH;
 			break;
 
 		default:
