@@ -491,7 +491,8 @@ static bool thunderx2_uncore_validate_event_group(struct perf_event *event)
 	if (leader->pmu != event->pmu && !is_software_event(leader))
 		return false;
 
-	for_each_sibling_event(sibling, event->group_leader) {
+	list_for_each_entry(sibling, &event->group_leader->sibling_list,
+			group_entry) {
 		if (is_software_event(sibling))
 			continue;
 		if (sibling->pmu != pmu)
